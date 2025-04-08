@@ -1,30 +1,154 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <title>Launch My APP</title>
+        <title>SMART Health App - Cholesterol Levels</title>
         <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+        <style>
+            #patient, #meds, #chart {
+                font-family: Monaco, monospace;
+                white-space: pre;
+                font-size: 13px;
+                height: 30vh;
+                overflow: scroll;
+                border: 1px solid #CCC;
+            }
+            #container {
+                width: 100%;
+                height: 400px;
+            }
+        </style>
+        <script src="https://code.highcharts.com/highcharts.js"></script>
     </head>
     <body>
-        <script>
-            FHIR.oauth2.authorize({
+        <h4>Current Patient</h4>
+        <div id="patient">Loading...</div>
+        <br/>
+        <h4>Medications</h4>
+        <div id="meds">Loading...</div>
+        <br/>
+        <h4>Cholesterol Test Results</h4>
+        <div id="chart"></div>
 
-              // The client_id that you should have obtained after registering a client at
-              // the EHR.
-              clientId: "my_web_app",
+        <script type="text/javascript">
+            FHIR.oauth2.ready().then(function(client) {
 
-              // The scopes that you request from the EHR. In this case we want to:
-              // launch            - Get the launch context
-              // openid & fhirUser - Get the current user
-              // patient/*.read    - Read patient data
-              scope: "launch openid fhirUser patient/*.read",
+                // Render the current patient (or any error)
+                client.patient.read().then(
+                    function(pt) {
+                        document.getElementById("patient").innerText = JSON.stringify(pt, null, 4);
+                    },
+                    function(error) {
+                        document.getElementById("patient").innerText = error.stack;
+                    }
+                );
+                
+                // Get MedicationRequests for the selected patient
+                client.request("/MedicationRequest?patient=" + client.patient.id, {
+                    resolveReferences: [ "medicationReference" ],
+                    graph: true
+                })
+                .then(function(data) {
+                    if (!data.entry || !data.entry.length) {
+                        throw new Error("No medications found for the selected patient");
+                    }
+                    return data.entry;
+                })
+                .then(
+                    function(meds) {
+                        document.getElementById("meds").innerText = JSON.stringify(meds, null, 4);
+                    },
+                    function(error) {
+                        document.getElementById("meds").innerText = error.stack;
+                    }
+                );
 
-              // Typically, if your redirectUri points to the root of the current directory
-              // (where the launchUri is), you can omit this option because the default value is
-              // ".". However, some servers do not support directory indexes so "." and "./"
-              // will not automatically map to the "index.html" file in that directory.
-              redirectUri: "index.html"
-            });
+                // Fetch Diabetes Patients and their Cholesterol Test Results
+                client.request("Condition?code=http://snomed.info/sct|44054006")
+                    .then(conditions => {
+                        if (conditions.entry && conditions.entry.length > 0) {
+                            conditions.entry.forEach(entry => {
+                                const condition = entry.resource;
+                                const patientId = condition.subject.reference.split("/")[1]; // Extract the patient ID
+                                
+                                client.request(`Patient/${patientId}`)
+                                    .then(patient => {
+                                        const patientInfo = {
+                                            name: `${patient.name[0].family}, ${patient.name[0].given[0]}`,
+                                            cholesterolTests: []
+                                        };
+                                        const loincCodes = [
+                                            "2093-3", // Total cholesterol
+                                            "13457-7", // LDL cholesterol
+                                            "2085-9", // HDL cholesterol
+                                            "2571-8"  // Triglycerides
+                                        ];
+
+                                        loincCodes.forEach(code => {
+                                            client.request(`Observation?subject=${patientId}&code=http://loinc.org|${code}`)
+                                                .then(observations => {
+                                                    if (observations.entry && observations.entry.length > 0) {
+                                                        observations.entry.forEach(obs => {
+                                                            const observation = obs.resource;
+                                                            if (observation.valueQuantity) {
+                                                                patientInfo.cholesterolTests.push({
+                                                                    loincCode: code,
+                                                                    result: observation.valueQuantity.value,
+                                                                    unit: observation.valueQuantity.unit
+                                                                });
+                                                            }
+                                                        });
+                                                    }
+                                                })
+                                                .catch(error => {
+                                                    console.error("Error fetching cholesterol test observations:", error);
+                                                });
+                                        });
+
+                                        // Plotting the cholesterol tests
+                                        setTimeout(() => {
+                                            if (patientInfo.cholesterolTests.length > 0) {
+                                                const seriesData = patientInfo.cholesterolTests.map(test => ({
+                                                    name: test.loincCode,
+                                                    data: [test.result]
+                                                }));
+
+                                                Highcharts.chart('chart', {
+                                                    chart: {
+                                                        type: 'column'
+                                                    },
+                                                    title: {
+                                                        text: `Cholesterol Test Results for ${patientInfo.name}`
+                                                    },
+                                                    xAxis: {
+                                                        categories: ['Test Type']
+                                                    },
+                                                    yAxis: {
+                                                        title: {
+                                                            text: 'Result (mg/dL)'
+                                                        }
+                                                    },
+                                                    series: seriesData
+                                                });
+                                            } else {
+                                                document.getElementById("chart").innerText = `No cholesterol test results found for ${patientInfo.name}.`;
+                                            }
+                                        }, 1000); // Adding delay to ensure all tests are queried
+                                    })
+                                    .catch(error => {
+                                        console.error("Error fetching patient details:", error);
+                                    });
+                            });
+                        } else {
+                            console.log("No patients with diabetes found.");
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Error fetching conditions:", error);
+                    });
+
+            }).catch(console.error);
         </script>
     </body>
 </html>
+
